@@ -126,8 +126,13 @@ def get_inference_prompt(
         else:
             text_list = text
 
+        # to mel spectrogram
+        ref_mel = mel_spectrogram(ref_audio)
+        ref_mel = ref_mel.squeeze(0)
+
         # Duration, mel frame length
-        ref_mel_len = ref_audio.shape[-1] // hop_length
+        ref_mel_len = ref_mel.shape[-1]
+
         if use_truth_duration:
             gt_audio, gt_sr = torchaudio.load(gt_wav)
             if gt_sr != target_sample_rate:
@@ -141,10 +146,6 @@ def get_inference_prompt(
             ref_text_len = len(prompt_text.encode("utf-8"))
             gen_text_len = len(gt_text.encode("utf-8"))
             total_mel_len = ref_mel_len + int(ref_mel_len / ref_text_len * gen_text_len / speed)
-
-        # to mel spectrogram
-        ref_mel = mel_spectrogram(ref_audio)
-        ref_mel = ref_mel.squeeze(0)
 
         # deal with batch
         assert infer_batch_size > 0, "infer_batch_size should be greater than 0."
@@ -394,14 +395,21 @@ def run_sim(args):
         wav1, sr1 = torchaudio.load(gen_wav)
         wav2, sr2 = torchaudio.load(prompt_wav)
 
-        resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
-        resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
-        wav1 = resample1(wav1)
-        wav2 = resample2(wav2)
-
         if use_gpu:
             wav1 = wav1.cuda(device)
             wav2 = wav2.cuda(device)
+
+        if sr1 != 16000:
+            resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
+            if use_gpu:
+                resample1 = resample1.cuda(device)
+            wav1 = resample1(wav1)
+        if sr2 != 16000:
+            resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
+            if use_gpu:
+                resample2 = resample2.cuda(device)
+            wav2 = resample2(wav2)
+
         with torch.no_grad():
             emb1 = model(wav1)
             emb2 = model(wav2)

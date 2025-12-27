@@ -4,15 +4,16 @@
 import os
 import sys
 
+
 sys.path.append(os.getcwd())
 
 import json
 from concurrent.futures import ProcessPoolExecutor
 from importlib.resources import files
-from tqdm import tqdm
 
 import torchaudio
 from datasets import Dataset
+from tqdm import tqdm
 
 from f5_tts.model.utils import convert_char_to_pinyin
 
@@ -121,5 +122,5 @@ if __name__ == "__main__":
     #                           -            -        1459   (polyphone)
     # char   vocab size      5264         5219        5042
 
-    # vocab size may be slightly different due to jieba tokenizer and pypinyin (e.g. way of polyphoneme)
+    # vocab size may be slightly different due to rjieba tokenizer and pypinyin (e.g. way of polyphoneme)
     # please be careful if using pretrained model, make sure the vocab.txt is same

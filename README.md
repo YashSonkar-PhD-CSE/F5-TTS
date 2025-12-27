@@ -2,11 +2,12 @@
 
 [![python](https://img.shields.io/badge/Python-3.10-brightgreen)](https://github.com/SWivid/F5-TTS)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06885-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2410.06885)
-[![demo](https://img.shields.io/badge/GitHub-Demo%20page-orange.svg)](https://swivid.github.io/F5-TTS/)
-[![hfspace](https://img.shields.io/badge/🤗-Space%20demo-yellow)](https://huggingface.co/spaces/mrfakename/E2-F5-TTS)
-[![msspace](https://img.shields.io/badge/🤖-Space%20demo-blue)](https://modelscope.cn/studios/modelscope/E2-F5-TTS)
-[![lab](https://img.shields.io/badge/X--LANCE-Lab-grey?labelColor=lightgrey)](https://x-lance.sjtu.edu.cn/)
-[![lab](https://img.shields.io/badge/Peng%20Cheng-Lab-grey?labelColor=lightgrey)](https://www.pcl.ac.cn)
+[![demo](https://img.shields.io/badge/GitHub-Demo-orange.svg)](https://swivid.github.io/F5-TTS/)
+[![hfspace](https://img.shields.io/badge/🤗-HF%20Space-yellow)](https://huggingface.co/spaces/mrfakename/E2-F5-TTS)
+[![msspace](https://img.shields.io/badge/🤖-MS%20Space-blue)](https://modelscope.cn/studios/AI-ModelScope/E2-F5-TTS)
+[![lab](https://img.shields.io/badge/🏫-X--LANCE-grey?labelColor=lightgrey)](https://x-lance.sjtu.edu.cn/)
+[![lab](https://img.shields.io/badge/🏫-SII-grey?labelColor=lightgrey)](https://www.sii.edu.cn/)
+[![lab](https://img.shields.io/badge/🏫-PCL-grey?labelColor=lightgrey)](https://www.pcl.ac.cn)
 <!-- <img src="https://github.com/user-attachments/assets/12d7749c-071a-427c-81bf-b87b91def670" alt="Watermark" style="width: 40px; height: auto"> -->
 
 **F5-TTS**: Diffusion Transformer with ConvNeXt V2, faster trained and inference.
@@ -26,9 +27,12 @@
 ### Create a separate environment if needed
 
 ```bash
-# Create a python 3.10 conda env (you could also use virtualenv)
-conda create -n f5-tts python=3.10
+# Create a conda env with python_version>=3.10  (you could also use virtualenv)
+conda create -n f5-tts python=3.11
 conda activate f5-tts
+
+# Install FFmpeg if you haven't yet
+conda install ffmpeg
 ```
 
 ### Install PyTorch with matched device
@@ -38,7 +42,11 @@ conda activate f5-tts
 
 > ```bash
 > # Install pytorch with your CUDA version, e.g.
+> pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+> 
+> # And also possible previous versions, e.g.
 > pip install torch==2.4.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
+> # etc.
 > ```
 
 </details>
@@ -91,7 +99,7 @@ conda activate f5-tts
 > ```bash
 > git clone https://github.com/SWivid/F5-TTS.git
 > cd F5-TTS
-> # git submodule update --init --recursive  # (optional, if need > bigvgan)
+> # git submodule update --init --recursive  # (optional, if use bigvgan as vocoder)
 > pip install -e .
 > ```
 
@@ -107,8 +115,26 @@ docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,targ
 docker container run --rm -it --gpus=all --mount 'type=volume,source=f5-tts,target=/root/.cache/huggingface/hub/' -p 7860:7860 ghcr.io/swivid/f5-tts:main f5-tts_infer-gradio --host 0.0.0.0
 ```
 
+### Runtime
+
+Deployment solution with Triton and TensorRT-LLM.
+
+#### Benchmark Results
+Decoding on a single L20 GPU, using 26 different prompt_audio & target_text pairs, 16 NFE.
+
+| Model               | Concurrency    | Avg Latency | RTF    | Mode            |
+|---------------------|----------------|-------------|--------|-----------------|
+| F5-TTS Base (Vocos) | 2              | 253 ms      | 0.0394 | Client-Server   |
+| F5-TTS Base (Vocos) | 1 (Batch_size) | -           | 0.0402 | Offline TRT-LLM |
+| F5-TTS Base (Vocos) | 1 (Batch_size) | -           | 0.1467 | Offline Pytorch |
+
+See [detailed instructions](src/f5_tts/runtime/triton_trtllm/README.md) for more information.
+
 
 ## Inference
+
+- In order to achieve desired performance, take a moment to read [detailed guidance](src/f5_tts/infer).
+- By properly searching the keywords of problem encountered, [issues](https://github.com/SWivid/F5-TTS/issues?q=is%3Aissue) are very helpful.
 
 ### 1. Gradio App
 
@@ -176,11 +202,6 @@ f5-tts_infer-cli -c custom.toml
 f5-tts_infer-cli -c src/f5_tts/infer/examples/multi/story.toml
 ```
 
-### 3. More instructions
-
-- In order to have better generation results, take a moment to read [detailed guidance](src/f5_tts/infer).
-- The [Issues](https://github.com/SWivid/F5-TTS/issues?q=is%3Aissue) are very useful, please try to find the solution by properly searching the keywords of problem encountered. If no answer found, then feel free to open an issue.
-
 
 ## Training
 
@@ -231,6 +252,7 @@ Note: Some model components have linting exceptions for E722 to accommodate tens
 - [mrfakename](https://x.com/realmrfakename) huggingface space demo ~
 - [f5-tts-mlx](https://github.com/lucasnewman/f5-tts-mlx/tree/main) Implementation with MLX framework by [Lucas Newman](https://github.com/lucasnewman)
 - [F5-TTS-ONNX](https://github.com/DakeQQ/F5-TTS-ONNX) ONNX Runtime version by [DakeQQ](https://github.com/DakeQQ)
+- [Yuekai Zhang](https://github.com/yuekaizhang) Triton and TensorRT-LLM support ~
 
 ## Citation
 If our work and codebase is useful for you, please cite as:

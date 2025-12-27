@@ -6,21 +6,21 @@ nt - text sequence
 nw - raw wave length
 d - dimension
 """
+# ruff: noqa: F722 F821
 
 from __future__ import annotations
 
 import torch
 from torch import nn
-
 from x_transformers.x_transformers import RotaryEmbedding
 
 from f5_tts.model.modules import (
-    TimestepEmbedding,
+    AdaLayerNorm_Final,
     ConvPositionEmbedding,
     MMDiTBlock,
-    AdaLayerNorm_Final,
-    precompute_freqs_cis,
+    TimestepEmbedding,
     get_pos_embed_indices,
+    precompute_freqs_cis,
 )
 
 
@@ -37,7 +37,7 @@ class TextEmbedding(nn.Module):
         self.precompute_max_pos = 1024
         self.register_buffer("freqs_cis", precompute_freqs_cis(out_dim, self.precompute_max_pos), persistent=False)
 
-    def forward(self, text: int["b nt"], drop_text=False) -> int["b nt d"]:  # noqa: F722
+    def forward(self, text: int["b nt"], drop_text=False) -> int["b nt d"]:
         text = text + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
         if self.mask_padding:
             text_mask = text == 0
@@ -70,7 +70,7 @@ class AudioEmbedding(nn.Module):
         self.linear = nn.Linear(2 * in_dim, out_dim)
         self.conv_pos_embed = ConvPositionEmbedding(out_dim)
 
-    def forward(self, x: float["b n d"], cond: float["b n d"], drop_audio_cond=False):  # noqa: F722
+    def forward(self, x: float["b n d"], cond: float["b n d"], drop_audio_cond=False):
         if drop_audio_cond:
             cond = torch.zeros_like(cond)
         x = torch.cat((x, cond), dim=-1)
@@ -142,26 +142,15 @@ class MMDiT(nn.Module):
         nn.init.constant_(self.proj_out.weight, 0)
         nn.init.constant_(self.proj_out.bias, 0)
 
-    def clear_cache(self):
-        self.text_cond, self.text_uncond = None, None
-
-    def forward(
+    def get_input_embed(
         self,
-        x: float["b n d"],  # nosied input audio  # noqa: F722
-        cond: float["b n d"],  # masked cond audio  # noqa: F722
-        text: int["b nt"],  # text  # noqa: F722
-        time: float["b"] | float[""],  # time step  # noqa: F821 F722
-        drop_audio_cond,  # cfg for cond audio
-        drop_text,  # cfg for text
-        mask: bool["b n"] | None = None,  # noqa: F722
-        cache=False,
+        x,  # b n d
+        cond,  # b n d
+        text,  # b nt
+        drop_audio_cond: bool = False,
+        drop_text: bool = False,
+        cache: bool = True,
     ):
-        batch = x.shape[0]
-        if time.ndim == 0:
-            time = time.repeat(batch)
-
-        # t: conditioning (time), c: context (text + masked cond audio), x: noised input audio
-        t = self.time_embed(time)
         if cache:
             if drop_text:
                 if self.text_uncond is None:
@@ -174,6 +163,41 @@ class MMDiT(nn.Module):
         else:
             c = self.text_embed(text, drop_text=drop_text)
         x = self.audio_embed(x, cond, drop_audio_cond=drop_audio_cond)
+
+        return x, c
+
+    def clear_cache(self):
+        self.text_cond, self.text_uncond = None, None
+
+    def forward(
+        self,
+        x: float["b n d"],  # nosied input audio
+        cond: float["b n d"],  # masked cond audio
+        text: int["b nt"],  # text
+        time: float["b"] | float[""],  # time step
+        mask: bool["b n"] | None = None,
+        drop_audio_cond: bool = False,  # cfg for cond audio
+        drop_text: bool = False,  # cfg for text
+        cfg_infer: bool = False,  # cfg inference, pack cond & uncond forward
+        cache: bool = False,
+    ):
+        batch = x.shape[0]
+        if time.ndim == 0:
+            time = time.repeat(batch)
+
+        # t: conditioning (time), c: context (text + masked cond audio), x: noised input audio
+        t = self.time_embed(time)
+        if cfg_infer:  # pack cond & uncond forward: b n d -> 2b n d
+            x_cond, c_cond = self.get_input_embed(x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache)
+            x_uncond, c_uncond = self.get_input_embed(x, cond, text, drop_audio_cond=True, drop_text=True, cache=cache)
+            x = torch.cat((x_cond, x_uncond), dim=0)
+            c = torch.cat((c_cond, c_uncond), dim=0)
+            t = torch.cat((t, t), dim=0)
+            mask = torch.cat((mask, mask), dim=0) if mask is not None else None
+        else:
+            x, c = self.get_input_embed(
+                x, cond, text, drop_audio_cond=drop_audio_cond, drop_text=drop_text, cache=cache
+            )
 
         seq_len = x.shape[1]
         text_len = text.shape[1]

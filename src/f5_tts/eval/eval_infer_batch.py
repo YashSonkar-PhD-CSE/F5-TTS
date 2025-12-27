@@ -1,6 +1,7 @@
 import os
 import sys
 
+
 sys.path.append(os.getcwd())
 
 import argparse
@@ -22,6 +23,7 @@ from f5_tts.eval.utils_eval import (
 from f5_tts.infer.utils_infer import load_checkpoint, load_vocoder
 from f5_tts.model import CFM
 from f5_tts.model.utils import get_tokenizer
+
 
 accelerator = Accelerator()
 device = f"cuda:{accelerator.process_index}"
@@ -46,6 +48,11 @@ def main():
     parser.add_argument("-ss", "--swaysampling", default=-1, type=float)
 
     parser.add_argument("-t", "--testset", required=True)
+    parser.add_argument(
+        "-p", "--librispeech_test_clean_path", default=f"{rel_path}/data/LibriSpeech/test-clean", type=str
+    )
+
+    parser.add_argument("--local", action="store_true", help="Use local vocoder checkpoint directory")
 
     args = parser.parse_args()
 
@@ -81,7 +88,7 @@ def main():
 
     if testset == "ls_pc_test_clean":
         metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
-        librispeech_test_clean_path = "<SOME_PATH>/LibriSpeech/test-clean"  # test-clean path
+        librispeech_test_clean_path = args.librispeech_test_clean_path
         metainfo = get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path)
 
     elif testset == "seedtts_test_zh":
@@ -119,7 +126,7 @@ def main():
     )
 
     # Vocoder model
-    local = False
+    local = args.local
     if mel_spec_type == "vocos":
         vocoder_local_path = "../checkpoints/charactr/vocos-mel-24khz"
     elif mel_spec_type == "bigvgan":
@@ -146,10 +153,21 @@ def main():
         vocab_char_map=vocab_char_map,
     ).to(device)
 
-    ckpt_path = rel_path + f"/ckpts/{exp_name}/model_{ckpt_step}.pt"
-    if not os.path.exists(ckpt_path):
+    ckpt_prefix = rel_path + f"/ckpts/{exp_name}/model_{ckpt_step}"
+    if os.path.exists(ckpt_prefix + ".pt"):
+        ckpt_path = ckpt_prefix + ".pt"
+    elif os.path.exists(ckpt_prefix + ".safetensors"):
+        ckpt_path = ckpt_prefix + ".safetensors"
+    else:
         print("Loading from self-organized training checkpoints rather than released pretrained.")
-        ckpt_path = rel_path + f"/{model_cfg.ckpts.save_dir}/model_{ckpt_step}.pt"
+        ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/model_{ckpt_step}"
+        if os.path.exists(ckpt_prefix + ".pt"):
+            ckpt_path = ckpt_prefix + ".pt"
+        elif os.path.exists(ckpt_prefix + ".safetensors"):
+            ckpt_path = ckpt_prefix + ".safetensors"
+        else:
+            raise ValueError("The checkpoint does not exist or cannot be found in given location.")
+
     dtype = torch.float32 if mel_spec_type == "bigvgan" else None
     model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
 

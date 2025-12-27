@@ -1,14 +1,12 @@
 import gc
 import json
-import numpy as np
 import os
 import platform
-import psutil
 import queue
 import random
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -16,21 +14,23 @@ import threading
 import time
 from glob import glob
 from importlib.resources import files
-from scipy.io import wavfile
 
 import click
 import gradio as gr
 import librosa
+import numpy as np
+import psutil
 import torch
 import torchaudio
 from cached_path import cached_path
 from datasets import Dataset as Dataset_
 from datasets.arrow_writer import ArrowWriter
 from safetensors.torch import load_file, save_file
+from scipy.io import wavfile
 
 from f5_tts.api import F5TTS
-from f5_tts.model.utils import convert_char_to_pinyin
 from f5_tts.infer.utils_infer import transcribe
+from f5_tts.model.utils import convert_char_to_pinyin
 
 
 training_process = None
@@ -138,6 +138,8 @@ def load_settings(project_name):
         "logger": "none",
         "bnb_optimizer": False,
     }
+    if device == "mps":
+        default_settings["mixed_precision"] = "none"
 
     # Load settings from file if it exists
     if os.path.isfile(file_setting):
@@ -176,50 +178,12 @@ def get_audio_duration(audio_path):
     return audio.shape[1] / sample_rate
 
 
-def clear_text(text):
-    """Clean and prepare text by lowering the case and stripping whitespace."""
-    return text.lower().strip()
-
-
-def get_rms(
-    y,
-    frame_length=2048,
-    hop_length=512,
-    pad_mode="constant",
-):  # https://github.com/RVC-Boss/GPT-SoVITS/blob/main/tools/slicer2.py
-    padding = (int(frame_length // 2), int(frame_length // 2))
-    y = np.pad(y, padding, mode=pad_mode)
-
-    axis = -1
-    # put our new within-frame axis at the end for now
-    out_strides = y.strides + tuple([y.strides[axis]])
-    # Reduce the shape on the framing axis
-    x_shape_trimmed = list(y.shape)
-    x_shape_trimmed[axis] -= frame_length - 1
-    out_shape = tuple(x_shape_trimmed) + tuple([frame_length])
-    xw = np.lib.stride_tricks.as_strided(y, shape=out_shape, strides=out_strides)
-    if axis < 0:
-        target_axis = axis - 1
-    else:
-        target_axis = axis + 1
-    xw = np.moveaxis(xw, -1, target_axis)
-    # Downsample along the target axis
-    slices = [slice(None)] * xw.ndim
-    slices[axis] = slice(0, None, hop_length)
-    x = xw[tuple(slices)]
-
-    # Calculate power
-    power = np.mean(np.abs(x) ** 2, axis=-2, keepdims=True)
-
-    return np.sqrt(power)
-
-
 class Slicer:  # https://github.com/RVC-Boss/GPT-SoVITS/blob/main/tools/slicer2.py
     def __init__(
         self,
         sr: int,
         threshold: float = -40.0,
-        min_length: int = 2000,
+        min_length: int = 20000,  # 20 seconds
         min_interval: int = 300,
         hop_size: int = 20,
         max_sil_kept: int = 2000,
@@ -250,7 +214,7 @@ class Slicer:  # https://github.com/RVC-Boss/GPT-SoVITS/blob/main/tools/slicer2.
             samples = waveform
         if samples.shape[0] <= self.min_length:
             return [waveform]
-        rms_list = get_rms(y=samples, frame_length=self.win_size, hop_length=self.hop_size).squeeze(0)
+        rms_list = librosa.feature.rms(y=samples, frame_length=self.win_size, hop_length=self.hop_size).squeeze(0)
         sil_tags = []
         silence_start = None
         clip_start = 0
@@ -304,8 +268,7 @@ class Slicer:  # https://github.com/RVC-Boss/GPT-SoVITS/blob/main/tools/slicer2.
             silence_end = min(total_frames, silence_start + self.max_sil_kept)
             pos = rms_list[silence_start : silence_end + 1].argmin() + silence_start
             sil_tags.append((pos, total_frames + 1))
-        # Apply and return slices.
-        ####音频+起始时间+终止时间
+        # Apply and return slices: [chunk, start, end]
         if len(sil_tags) == 0:
             return [[waveform, 0, int(total_frames * self.hop_size)]]
         else:
@@ -432,7 +395,7 @@ def start_training(
         fp16 = ""
 
     cmd = (
-        f"accelerate launch {fp16} {file_train} --exp_name {exp_name}"
+        f'accelerate launch {fp16} "{file_train}" --exp_name {exp_name}'
         f" --learning_rate {learning_rate}"
         f" --batch_size_per_gpu {batch_size_per_gpu}"
         f" --batch_size_type {batch_size_type}"
@@ -451,7 +414,7 @@ def start_training(
         cmd += " --finetune"
 
     if file_checkpoint_train != "":
-        cmd += f" --pretrain {file_checkpoint_train}"
+        cmd += f' --pretrain "{file_checkpoint_train}"'
 
     if tokenizer_file != "":
         cmd += f" --tokenizer_path {tokenizer_file}"
@@ -705,7 +668,7 @@ def transcribe_all(name_project, audio_files, language, user=False, progress=gr.
 
             try:
                 text = transcribe(file_segment, language)
-                text = text.lower().strip().replace('"', "")
+                text = text.strip()
 
                 data += f"{name_segment}|{text}\n"
 
@@ -814,7 +777,7 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
             error_files.append([file_audio, "very short text length 3"])
             continue
 
-        text = clear_text(text)
+        text = text.strip()
         text = convert_char_to_pinyin([text], polyphone=True)[0]
 
         audio_path_list.append(file_audio)
@@ -833,9 +796,10 @@ def create_metadata(name_project, ch_tokenizer, progress=gr.Progress()):
     min_second = round(min(duration_list), 2)
     max_second = round(max(duration_list), 2)
 
-    with ArrowWriter(path=file_raw, writer_batch_size=1) as writer:
+    with ArrowWriter(path=file_raw) as writer:
         for line in progress.tqdm(result, total=len(result), desc="prepare data"):
             writer.write(line)
+        writer.finalize()
 
     with open(file_duration, "w") as f:
         json.dump({"duration": duration_list}, f, ensure_ascii=False)
@@ -1097,7 +1061,7 @@ def vocab_extend(project_name, symbols, model_type):
     return f"vocab old size : {size_vocab}\nvocab new size : {size}\nvocab add : {vocab_size_new}\nnew symbols :\n{vocab_new}"
 
 
-def vocab_check(project_name):
+def vocab_check(project_name, tokenizer_type):
     name_project = project_name
     path_project = os.path.join(path_data, name_project)
 
@@ -1125,7 +1089,9 @@ def vocab_check(project_name):
         if len(sp) != 2:
             continue
 
-        text = sp[1].lower().strip()
+        text = sp[1].strip()
+        if tokenizer_type == "pinyin":
+            text = convert_char_to_pinyin([text], polyphone=True)[0]
 
         for t in text:
             if t not in vocab and t not in miss_symbols_keep:
@@ -1230,8 +1196,8 @@ def infer(
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         tts_api.infer(
             ref_file=ref_audio,
-            ref_text=ref_text.lower().strip(),
-            gen_text=gen_text.lower().strip(),
+            ref_text=ref_text.strip(),
+            gen_text=gen_text.strip(),
             nfe_step=nfe_step,
             speed=speed,
             remove_silence=remove_silence,
@@ -1496,7 +1462,9 @@ Using the extended model, you can finetune to a new language that is missing sym
             txt_info_extend = gr.Textbox(label="Info", value="")
 
             txt_extend.change(vocab_count, inputs=[txt_extend], outputs=[txt_count_symbol])
-            check_button.click(fn=vocab_check, inputs=[cm_project], outputs=[txt_info_check, txt_extend])
+            check_button.click(
+                fn=vocab_check, inputs=[cm_project, tokenizer_type], outputs=[txt_info_check, txt_extend]
+            )
             extend_button.click(
                 fn=vocab_extend, inputs=[cm_project, txt_extend, exp_name_extend], outputs=[txt_info_extend]
             )

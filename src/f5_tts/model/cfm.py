@@ -6,6 +6,7 @@ nt - text sequence
 nw - raw wave length
 d - dimension
 """
+# ruff: noqa: F722 F821
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import (
     default,
     exists,
+    get_epss_timesteps,
     lens_to_mask,
     list_str_to_idx,
     list_str_to_tensor,
@@ -81,17 +83,18 @@ class CFM(nn.Module):
     @torch.no_grad()
     def sample(
         self,
-        cond: float["b n d"] | float["b nw"],  # noqa: F722
-        text: int["b nt"] | list[str],  # noqa: F722
-        duration: int | int["b"],  # noqa: F821
+        cond: float["b n d"] | float["b nw"],
+        text: int["b nt"] | list[str],
+        duration: int | int["b"],
         *,
-        lens: int["b"] | None = None,  # noqa: F821
+        lens: int["b"] | None = None,
         steps=32,
         cfg_strength=1.0,
         sway_sampling_coef=None,
         seed: int | None = None,
         max_duration=4096,
-        vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,  # noqa: F722
+        vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,
+        use_epss=True,
         no_ref_audio=False,
         duplicate_test=False,
         t_inter=0.1,
@@ -160,16 +163,31 @@ class CFM(nn.Module):
             # at each step, conditioning is fixed
             # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
 
-            # predict flow
-            pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True
-            )
+            # predict flow (cond)
             if cfg_strength < 1e-5:
+                pred = self.transformer(
+                    x=x,
+                    cond=step_cond,
+                    text=text,
+                    time=t,
+                    mask=mask,
+                    drop_audio_cond=False,
+                    drop_text=False,
+                    cache=True,
+                )
                 return pred
 
-            null_pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True, cache=True
+            # predict flow (cond and uncond), for classifier-free guidance
+            pred_cfg = self.transformer(
+                x=x,
+                cond=step_cond,
+                text=text,
+                time=t,
+                mask=mask,
+                cfg_infer=True,
+                cache=True,
             )
+            pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
             return pred + (pred - null_pred) * cfg_strength
 
         # noise input
@@ -190,7 +208,10 @@ class CFM(nn.Module):
             y0 = (1 - t_start) * y0 + t_start * test_cond
             steps = int(steps * (1 - t_start))
 
-        t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
+        if t_start == 0 and use_epss:  # use Empirically Pruned Step Sampling for low NFE
+            t = get_epss_timesteps(steps, device=self.device, dtype=step_cond.dtype)
+        else:
+            t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
@@ -209,10 +230,10 @@ class CFM(nn.Module):
 
     def forward(
         self,
-        inp: float["b n d"] | float["b nw"],  # mel or raw wave  # noqa: F722
-        text: int["b nt"] | list[str],  # noqa: F722
+        inp: float["b n d"] | float["b nw"],  # mel or raw wave
+        text: int["b nt"] | list[str],
         *,
-        lens: int["b"] | None = None,  # noqa: F821
+        lens: int["b"] | None = None,
         noise_scheduler: str | None = None,
     ):
         # handle raw wave
@@ -232,10 +253,9 @@ class CFM(nn.Module):
             assert text.shape[0] == batch
 
         # lens and mask
-        if not exists(lens):
+        if not exists(lens):  # if lens not acquired by trainer from collate_fn
             lens = torch.full((batch,), seq_len, device=device)
-
-        mask = lens_to_mask(lens, length=seq_len)  # useless here, as collate_fn will pad to max length in batch
+        mask = lens_to_mask(lens, length=seq_len)
 
         # get a random span to mask out for training conditionally
         frac_lengths = torch.zeros((batch,), device=self.device).float().uniform_(*self.frac_lengths_mask)
@@ -270,10 +290,9 @@ class CFM(nn.Module):
         else:
             drop_text = False
 
-        # if want rigourously mask out padding, record in collate_fn in dataset.py, and pass in here
-        # adding mask will use more memory, thus also need to adjust batchsampler with scaled down threshold for long sequences
+        # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
         pred = self.transformer(
-            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text
+            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask
         )
 
         # flow matching loss

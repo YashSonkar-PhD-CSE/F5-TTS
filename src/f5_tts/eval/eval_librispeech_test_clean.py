@@ -1,9 +1,11 @@
 # Evaluate with Librispeech test-clean, ~3s prompt to generate 4-10s audio (the way of valle/voicebox evaluation)
 
 import argparse
+import ast
 import json
 import os
 import sys
+
 
 sys.path.append(os.getcwd())
 
@@ -11,11 +13,9 @@ import multiprocessing as mp
 from importlib.resources import files
 
 import numpy as np
-from f5_tts.eval.utils_eval import (
-    get_librispeech_test,
-    run_asr_wer,
-    run_sim,
-)
+
+from f5_tts.eval.utils_eval import get_librispeech_test, run_asr_wer, run_sim
+
 
 rel_path = str(files("f5_tts").joinpath("../../"))
 
@@ -26,9 +26,24 @@ def get_args():
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
     parser.add_argument("-p", "--librispeech_test_clean_path", type=str, required=True)
-    parser.add_argument("-n", "--gpu_nums", type=int, default=8, help="Number of GPUs to use")
+    parser.add_argument(
+        "-n", "--gpu_nums", type=str, default="8", help="Number of GPUs to use (e.g., 8) or GPU list (e.g., [0,1,2,3])"
+    )
     parser.add_argument("--local", action="store_true", help="Use local custom checkpoint directory")
     return parser.parse_args()
+
+
+def parse_gpu_nums(gpu_nums_str):
+    try:
+        if gpu_nums_str.startswith("[") and gpu_nums_str.endswith("]"):
+            gpu_list = ast.literal_eval(gpu_nums_str)
+            if isinstance(gpu_list, list):
+                return gpu_list
+        return list(range(int(gpu_nums_str)))
+    except (ValueError, SyntaxError):
+        raise argparse.ArgumentTypeError(
+            f"Invalid GPU specification: {gpu_nums_str}. Use a number (e.g., 8) or a list (e.g., [0,1,2,3])"
+        )
 
 
 def main():
@@ -39,7 +54,7 @@ def main():
     gen_wav_dir = args.gen_wav_dir
     metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
 
-    gpus = list(range(args.gpu_nums))
+    gpus = parse_gpu_nums(args.gpu_nums)
     test_set = get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path)
 
     ## In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
